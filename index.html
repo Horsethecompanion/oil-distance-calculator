@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oil-to-Distance Calculator</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+     integrity="sha200-Z/cOqQjJz6Z+qV/l+M/w+e+n/p+q/r+s+t+u+v+w+x+y+z+=" crossorigin="">
+    <style>
+        body { font-family: sans-serif; margin: 0; padding: 0; display: flex; flex-direction: column; min-height: 100vh; background-color: #f0f0f0; }
+        #map { flex-grow: 1; height: 600px; width: 100%; border: 1px solid #ccc; }
+        .sidebar { background-color: white; padding: 20px; border-top: 1px solid #ccc; box-shadow: 0 -2px 5px rgba(0,0,0,0.1); display: flex; flex-direction: column; gap: 15px; }
+        .sidebar h1 { margin: 0 0 10px 0; font-size: 1.8em; }
+        .sidebar p { margin: 0 0 10px 0; font-size: 0.9em; line-height: 1.5; color: #555; }
+        .input-group { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .input-group input[type="text"] { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 5px; min-width: 200px; }
+        .input-group button { padding: 10px 15px; background-color: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        .input-group button:hover { background-color: #0056b3; }
+        .legend { margin-top: 15px; font-size: 0.9em; }
+        .legend div { display: flex; align-items: center; margin-bottom: 5px; }
+        .legend span { width: 20px; height: 10px; margin-right: 10px; border-radius: 2px; }
+
+        /* Explanations */
+        .explanation-section { margin-top: 20px; border-top: 1px solid #eee; padding-top: 20px; }
+        .explanation-section h2 { font-size: 1.4em; margin-bottom: 10px; }
+        .explanation-section h3 { font-size: 1.1em; margin-top: 15px; margin-bottom: 5px; color: #333; }
+        .explanation-section ul { list-style-type: disc; margin-left: 20px; padding: 0; font-size: 0.9em; color: #555; }
+        .explanation-section li { margin-bottom: 5px; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div class="sidebar">
+        <h1>How Far Can a Barrel of Oil Take You?</h1>
+        <p>Enter an address to see the estimated travel distance for different vehicles, powered by the energy equivalent of one barrel of crude oil.</p>
+
+        <div class="input-group">
+            <input type="text" id="address-input" placeholder="Enter an address, e.g., Christchurch, NZ">
+            <button id="go-button">Go!</button>
+        </div>
+
+        <div class="legend" id="legend">
+            <h3>Ranges per Barrel (~159 Litres of Crude Equivalent)</h3>
+        </div>
+
+        <div class="explanation-section">
+            <h2>The Efficiency Gap: Engine vs. Motor</h2>
+            <p>Even when both ultimately rely on oil (a worst-case for EVs), electric motors are fundamentally more efficient at converting energy into motion than internal combustion engines. Here's why:</p>
+
+            <h3>1. Internal Combustion Engine (ICE) Pathway (Oil → Fuel → Wheels)</h3>
+            <ul>
+                <li>**Refining crude to petrol/diesel:** ~85-90% efficient.</li>
+                <li>**Engine efficiency (fuel in tank → wheels):** ~20-30% (most energy lost as heat).</li>
+                <li>**Total efficiency from barrel to wheels:** Roughly 17-25%.</li>
+            </ul>
+
+            <h3>2. Electric Vehicle (EV) Pathway (Oil → Electricity → Battery → Wheels)</h3>
+            <p>(Assuming oil is burned in a power plant to generate electricity)</p>
+            <ul>
+                <li>**Burning oil in a power plant (oil → electricity):** ~35-45% efficient (much higher for modern plants than small engines).</li>
+                <li>**Electricity transmission & distribution:** ~90-95% efficient.</li>
+                <li>**Charging + battery losses:** ~85-90% efficient.</li>
+                <li>**Electric motor + drivetrain (battery → wheels):** ~85-95% efficient (vastly more efficient than ICE).</li>
+                <li>**Total efficiency from barrel to wheels:** Roughly 25-35%.</li>
+            </ul>
+            <p>This shows that even when electricity comes from burning oil, the EV pathway delivers more usable energy. In reality, most grids (like NZ's) use significant renewable energy, making the EV's advantage even larger.</p>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+     integrity="sha200-Z/cOqQjJz6Z+qV/l+M/w+e+n/p+q/r+s+t+u+v+w+x+y+z+=" crossorigin=""></script>
+    <script>
+        const ENERGY_PER_BARREL_KWH_REFINED = 1700; // Approx. kWh of energy in refined fuel from one barrel (ChatGPT's base)
+
+        const VEHICLES = [
+            { type: 'E-Bike', color: '#10B981', eff_kwh_per_100km: 0.4, path_eff: 0.90, range: 0 }, // E-bike directly uses grid electricity, high path eff
+            { type: 'EV Car', color: '#3B82F6', eff_kwh_per_100km: 17, path_eff: 0.85, range: 0 }, // EV using electricity from fossil plant
+            { type: 'Hybrid Car', color: '#F59E0B', eff_kwh_per_100km: 50, path_eff: 0.25, range: 0 }, // Hybrid (simplified, using ICE pathway for fuel portion, then blend)
+            { type: 'ICE Car', color: '#EF4444', eff_kwh_per_100km: 75, path_eff: 0.20, range: 0 }, // ICE car efficiency (petrol equivalent kWh)
+            { type: 'SUV/Truck', color: '#A855F7', eff_kwh_per_100km: 105, path_eff: 0.18, range: 0 }, // SUV/Truck efficiency (petrol equivalent kWh)
+        ];
+
+        // Calculate ranges per barrel
+        VEHICLES.forEach(v => {
+            // For E-Bike and EV, path_eff is from power plant to wheels
+            // For ICE, path_eff is from refined fuel to wheels
+            const usableEnergyKWh = ENERGY_PER_BARREL_KWH_REFINED * v.path_eff; // simplified for now
+            v.range = (usableEnergyKWh / v.eff_kwh_per_100km) * 100; // km
+        });
+
+        let map;
+        let currentMarkersAndCircles = [];
+
+        function initMap(lat, lon) {
+            if (map) {
+                map.remove();
+            }
+            map = L.map('map').setView([lat, lon], 7); // Zoom level 7
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(map);
+        }
+
+        function clearOverlays() {
+            currentMarkersAndCircles.forEach(layer => map.removeLayer(layer));
+            currentMarkersAndCircles = [];
+        }
+
+        function drawRanges(lat, lon) {
+            clearOverlays();
+
+            const startMarker = L.marker([lat, lon]).addTo(map)
+                .bindPopup('Starting Point')
+                .openPopup();
+            currentMarkersAndCircles.push(startMarker);
+
+            VEHICLES.forEach(v => {
+                const circle = L.circle([lat, lon], {
+                    color: v.color,
+                    fillColor: v.color,
+                    fillOpacity: 0.2,
+                    radius: v.range * 1000 // Leaflet uses meters for radius
+                }).addTo(map);
+                circle.bindPopup(`${v.type}: ${Math.round(v.range).toLocaleString()} km`).openPopup(); // Initial popup
+                currentMarkersAndCircles.push(circle);
+            });
+
+            map.fitBounds(currentMarkersAndCircles[0].getLatLng().toBounds(VEHICLES[VEHICLES.length -1].range * 1000 * 2), { padding: [50, 50] });
+        }
+
+        async function geocodeAddress(address) {
+            const nominatimUrl = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(address)}&format=json&limit=1`;
+            try {
+                const response = await fetch(nominatimUrl);
+                const data = await response.json();
+                if (data && data.length > 0) {
+                    const lat = parseFloat(data[0].lat);
+                    const lon = parseFloat(data[0].lon);
+                    initMap(lat, lon);
+                    drawRanges(lat, lon);
+                    updateLegend();
+                } else {
+                    alert('Address not found. Please try again.');
+                }
+            } catch (error) {
+                console.error('Error geocoding address:', error);
+                alert('Error geocoding address. Please try again later.');
+            }
+        }
+
+        function updateLegend() {
+            const legendDiv = document.getElementById('legend');
+            let legendHtml = `<h3>Ranges per Barrel (~159 Litres of Crude Equivalent)</h3>`;
+            VEHICLES.forEach(v => {
+                legendHtml += `
+                    <div>
+                        <span style="background-color: ${v.color};"></span>
+                        ${v.type}: ${Math.round(v.range).toLocaleString()} km
+                    </div>
+                `;
+            });
+            legendDiv.innerHTML = legendHtml;
+        }
+
+        document.getElementById('go-button').addEventListener('click', () => {
+            const address = document.getElementById('address-input').value;
+            if (address) {
+                geocodeAddress(address);
+            } else {
+                alert('Please enter an address.');
+            }
+        });
+
+        // Initial load with a default location (Christchurch, NZ)
+        // Christchurch: -43.532055, 172.636244
+        // Default ranges are also calculated with crude equivalent, so all vehicles are compared on the same energy basis
+        initMap(-43.532055, 172.636244);
+        drawRanges(-43.532055, 172.636244);
+        updateLegend();
+
+    </script>
+</body>
+</html>
